@@ -66,6 +66,7 @@
             <li>Use a locking mechanism around the critical section to ensure that all of it happens as an atomic operation (<code>select_for_update</code>, <code>django-pglocks</code>)</li>
             <li>Use atomic actions that eliminate the possibility of stale data (<code>F</code> expressions, <code>get_or_create</code>)</li>
           </ul>
+          <aside class="notes">Switching from generic race conditions to specifically ones specifically involving Django</aside>
         </section>
         <section>
           <h3><code>F</code> expressions</h3>
@@ -100,6 +101,7 @@
  # ------------------------------------------------------------------------
  # Fetch info from database when not using cache
           </code></pre>
+          <aside class="notes">There are also now more generic Query expressions that allow for conditionals, control flow, etc. If you can do it in SQL, you can do it in the Djang ORM</aside>
         </section>
         <section>
           <h3><code>select_for_update</code></h3>
