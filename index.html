@@ -57,7 +57,7 @@
           </ul>
         </section>
         <section>
-          <h3>reaad-modify-write</h3>
+          <h3>read-modify-write</h3>
           <img src="img/Race-condition.png"></img>
         </section>
         <section>
@@ -103,7 +103,7 @@
         </section>
         <section>
           <h3><code>select_for_update</code></h3>
-          <p>Part of the SQL standard, prevents writing and locking of selected rows</p>
+          <p>Part of the SQL standard, blocks writing and locking of selected rows until the lock is released</p>
           <pre><code data-trim class="diff">
 --- a/src/django/users/views.py
 +++ b/src/django/users/views.py
