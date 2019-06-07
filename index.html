@@ -1,49 +1,225 @@
 <!doctype html>
 <html>
-	<head>
-		<meta charset="utf-8">
-		<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 
-		<title>reveal.js</title>
+    <title>Handling race conditions with the Django ORM</title>
 
-		<link rel="stylesheet" href="css/reset.css">
-		<link rel="stylesheet" href="css/reveal.css">
-		<link rel="stylesheet" href="css/theme/black.css">
+    <link rel="stylesheet" href="css/reset.css">
+    <link rel="stylesheet" href="css/reveal.css">
+    <link rel="stylesheet" href="css/theme/black.css">
 
-		<!-- Theme used for syntax highlighting of code -->
-		<link rel="stylesheet" href="lib/css/monokai.css">
+    <!-- Theme used for syntax highlighting of code -->
+    <link rel="stylesheet" href="lib/css/monokai.css">
 
-		<!-- Printing and PDF exports -->
-		<script>
-			var link = document.createElement( 'link' );
-			link.rel = 'stylesheet';
-			link.type = 'text/css';
-			link.href = window.location.search.match( /print-pdf/gi ) ? 'css/print/pdf.css' : 'css/print/paper.css';
-			document.getElementsByTagName( 'head' )[0].appendChild( link );
-		</script>
-	</head>
-	<body>
-		<div class="reveal">
-			<div class="slides">
-				<section>Slide 1</section>
-				<section>Slide 2</section>
-			</div>
-		</div>
+    <style>
+    .reveal .slides {
+      width: 1000px !important;
+    }
+    ul {
+      font-size: 35px;
+    }
+    .reveal pre {
+      width: 100%;
+    }
+    pre > code {
+      font-size: 20px;
+      line-height: 20px;
+    }
+    </style>
 
-		<script src="js/reveal.js"></script>
+    <!-- Printing and PDF exports -->
+    <script>
+      var link = document.createElement( 'link' );
+      link.rel = 'stylesheet';
+      link.type = 'text/css';
+      link.href = window.location.search.match( /print-pdf/gi ) ? 'css/print/pdf.css' : 'css/print/paper.css';
+      document.getElementsByTagName( 'head' )[0].appendChild( link );
+    </script>
+  </head>
+  <body>
+    <div class="reveal">
+      <div class="slides">
+        <section class="present">Handling race conditions with the Django ORM</section>
+        <section>
+          <h3>What is a race condition?</h3>
+          Race conditions arise in software when an application depends on the sequence or timing of processes or threads for it to operate properly. ... Critical race conditions often happen when the processes or threads depend on some shared state. Operations upon shared states are critical sections that must be mutually exclusive. Failure to obey this rule opens up the possibility of corrupting the shared state.
+          <small>https://en.wikipedia.org/wiki/Race_condition</small>
+        </section>
+        <section>
+          <h3>What is a race condition?</h3>
+          <ul>
+            <li>There must be concurrent access to data in a shared location (different threads accessing shared memory, concurrent access to a shared resource like a database or cache service, etc.)</li>
+            <li>Two common scenarios: read-modify-write and check-then-act</li>
+            <li>read-modify-write: Read data from a shared location, modify it based on its current state, and write it back to the shared location</li>
+            <li>check-then-act: Read data from a shared location, then performs some action based on its current state</li>
+          </ul>
+        </section>
+        <section>
+          <h3>reaad-modify-write</h3>
+          <img src="img/Race-condition.png"></img>
+        </section>
+        <section>
+          <h3>How do you fix it?</h3>
+          <ul>
+            <li>Use a locking mechanism around the critical section to ensure that all of it happens as an atomic operation (<code>select_for_update</code>, <code>django-pglocks</code>)</li>
+            <li>Use atomic actions that eliminate the possibility of stale data (<code>F</code> expressions, <code>get_or_create</code>)</li>
+          </ul>
+        </section>
+        <section>
+          <h3><code>F</code> expressions</h3>
+          <p>Used with the Django ORM to generate SQL that can update values based on the current database state</p>
+          <pre><code data-trim class="diff">
+--- a/opentreemap/treemap/lib/object_caches.py
++++ b/opentreemap/treemap/lib/object_caches.py
+@@ -1,5 +1,6 @@
+ # -*- coding: utf-8 -*-
+ from django.conf import settings
++from django.db.models import F
 
-		<script>
-			// More info about config & dependencies:
-			// - https://github.com/hakimel/reveal.js#configuration
-			// - https://github.com/hakimel/reveal.js#dependencies
-			Reveal.initialize({
-				dependencies: [
-					{ src: 'plugin/markdown/marked.js' },
-					{ src: 'plugin/markdown/markdown.js' },
-					{ src: 'plugin/notes/notes.js', async: true },
-					{ src: 'plugin/highlight/highlight.js', async: true }
-				]
-			});
-		</script>
-	</body>
+ # For each instance, cache "adjunct" objects -- frequently-accessed objects
+ # which change rarely -- by storing them in local memory. Track cache validity
+@@ -52,8 +53,16 @@ def invalidate_adjuncts(*args, **kwargs):
+         instance = adjunct_object.instance
+         if instance.id in _adjuncts:
+             del _adjuncts[instance.id]
+-        instance.adjuncts_timestamp += 1
+-        instance.save()
++        increment_adjuncts_timestamp(instance)
++
++
++def increment_adjuncts_timestamp(instance):
++    from treemap.models import Instance
++    # The instance passed to this function may have stale data, so we
++    # don't want to save stale fields along with the new timestamp.
++    Instance.objects.filter(pk=instance.id)\
++                    .update(adjuncts_timestamp=F('adjuncts_timestamp') + 1)
++
+
+ # ------------------------------------------------------------------------
+ # Fetch info from database when not using cache
+          </code></pre>
+        </section>
+        <section>
+          <h3><code>select_for_update</code></h3>
+          <p>Part of the SQL standard, prevents writing and locking of selected rows</p>
+          <pre><code data-trim class="diff">
+--- a/src/django/users/views.py
++++ b/src/django/users/views.py
+@@ -275,8 +275,11 @@ class OrganizationViewSet(mixins.CreateModelMixin,
+
+     @transaction.atomic
+     def create(self, request, *args, **kwargs):
+-        if (self.request.user.primary_organization and not
+-           self.request.user.can_create_multiple_organizations):
++        # Lock current user row so we can avoid data races that would allow a user
++        # to create multiple organizations despite lacking permissions
++        user = PlanItUser.objects.select_for_update().get(pk=request.user.pk)
++
++        if user.primary_organization and not user.can_create_multiple_organizations:
+             return Response('User already has an organization',
+                             status=status.HTTP_400_BAD_REQUEST)
+
+@@ -290,23 +293,23 @@ class OrganizationViewSet(mixins.CreateModelMixin,
+             # Don't let a user send an email to themselves. We could also validate this and raise an
+             # error, but in that case the user would presumably just delete themselves and try
+             # again, so it's probably friendlier to do that for them and ignore the "error".
+-            if email == self.request.user.email:
++            if email == user.email:
+                 continue
+-            user, was_created, was_added = PlanItUser.objects.add_via_email_to_organization(
++            invitee, was_created, was_added = PlanItUser.objects.add_via_email_to_organization(
+                 email, organization
+             )
+
+             if was_created:
+-                RegistrationView(request=request).send_invitation_email(user)
++                RegistrationView(request=request).send_invitation_email(invitee)
+             # Let them know they've been added to the organization
+             elif was_added:
+-                user.email_user('registration/existing_user_invitation_email',
+-                                {'user': user, 'organization': organization,
+-                                 'login_url': settings.PLANIT_APP_HOME + '/login'})
++                invitee.email_user('registration/existing_user_invitation_email',
++                                   {'user': invitee, 'organization': organization,
++                                    'login_url': settings.PLANIT_APP_HOME + '/login'})
+
+-        self.request.user.organizations.add(organization)
+-        self.request.user.primary_organization = organization
+-        self.request.user.save()
++        user.organizations.add(organization)
++        user.primary_organization = organization
++        user.save()
+
+         headers = self.get_success_headers(serializer.data)
+         return Response(serializer.data, status=status.HTTP_201_CREATED, headers=headers)
+          </code></pre>
+        </section>
+        <section>
+          <h3><code>django-pglocks</code></h3>
+          <p>Small utility library that uses PSQL advisory locks</p>
+          <pre><code data-trim>
+import logging
+from django_pglocks import advisory_lock
+
+from django.core.management.base import BaseCommand
+
+from cicero.emailer.timedmailer import TimedMailer
+
+logger = logging.getLogger(__name__)
+
+
+class Command(BaseCommand):
+    """
+    Management command for sending timed email reminders.
+    """
+    args = 'displaygroup'
+    help = 'Send emails if this machine is first in displaygroup.'
+
+    def handle(self, *args, **options):
+        """
+        Runs the emailer batch command
+        """
+
+        lock_id = 'bucket_expire'
+        with advisory_lock(lock_id, wait=False) as acquired:
+            if not acquired:
+                logger.warning("Failed to obtain emailer advisory lock")
+                return
+
+            logger.info("Sending messages...")
+
+            TimedMailer().run()
+
+            logger.info("Task complete.")
+          </code></pre>
+        </section>
+        <section>
+          <h3>Things to watch out for</h3>
+          <ul>
+            <li>
+              Explicit locking can lead to deadlocks. PostgeSQL will automatically detect deadlocks and abort one of the transactions. Avoid deadlocks by always using a consistent locking order, and always use the most restrictive first.</li>
+            <li>The application may be blocked for a long time waiting for the lock to be resolved. You can instead not block when a lock is being used and handle the exception in your application.</li>
+          </ul>
+        </section>
+      </div>
+    </div>
+
+    <script src="js/reveal.js"></script>
+
+    <script>
+      // More info about config & dependencies:
+      // - https://github.com/hakimel/reveal.js#configuration
+      // - https://github.com/hakimel/reveal.js#dependencies
+      Reveal.initialize({
+        dependencies: [
+          { src: 'plugin/markdown/marked.js' },
+          { src: 'plugin/markdown/markdown.js' },
+          { src: 'plugin/notes/notes.js', async: true },
+          { src: 'plugin/highlight/highlight.js', async: true }
+        ]
+      });
+    </script>
+  </body>
 </html>
